@@ -27,32 +27,8 @@ def finite_difference_jacobian(f, x, u, dt, eps=1e-4):
         fu[:, i] = (f(x, u + du, dt) - f(x, u - du, dt)) / (2 * eps)
     return fx, fu
 
-# Build cost function from costmap (bilinear interpolation)
-def build_cost_fn_from_costmap(costmap, grid_x, grid_y):
-    def fn(x):
-        px, py = x[0], x[1]
-        ix = np.clip(np.searchsorted(grid_x, px) - 1, 0, len(grid_x) - 2)
-        iy = np.clip(np.searchsorted(grid_y, py) - 1, 0, len(grid_y) - 2)
-
-        x1, x2 = grid_x[ix], grid_x[ix+1]
-        y1, y2 = grid_y[iy], grid_y[iy+1]
-        q11 = costmap[iy, ix]
-        q12 = costmap[iy+1, ix]
-        q21 = costmap[iy, ix+1]
-        q22 = costmap[iy+1, ix+1]
-
-        denom = (x2 - x1) * (y2 - y1)
-        if denom == 0:
-            return 0
-        interp = (q11 * (x2 - px) * (y2 - py) +
-                  q21 * (px - x1) * (y2 - py) +
-                  q12 * (x2 - px) * (py - y1) +
-                  q22 * (px - x1) * (py - y1)) / denom
-        return interp
-    return fn
-
 # Quadratic approximation of cost
-def cost_quadratic_approx(x, u, goal, gs_map, R=np.eye(2)*0.1, w_obs=1.0, w_risk=2.0):
+def cost_quadratic_approx(x, u, goal, gs_map, R=np.eye(2)*0.1, w_logbar=5.0):
     nx, nu = 4, 2
     Q = np.zeros((nx, nx))
     Rm = R
@@ -60,9 +36,13 @@ def cost_quadratic_approx(x, u, goal, gs_map, R=np.eye(2)*0.1, w_obs=1.0, w_risk
     r = 2 * R @ u
     l = u @ R @ u
 
-    pos = x[:2][None, :] 
-    _, _, weighted_risk = gs_map.density_with_cov(pos)
-    l += w_risk * weighted_risk[0] 
+    pos = x[:2][None, :]
+    logbar_cost, logbar_grad = gs_map.mahalanobis_logbarrier(pos, delta=0.5)
+
+    # 위치에 대한 gradient 및 hessian 유사항 반영
+    q[:2] += w_logbar * logbar_grad[0]
+    Q[:2, :2] += w_logbar * np.eye(2)
+    l += w_logbar * logbar_cost[0]
 
     return Q, Rm, q, r, l
 
@@ -73,11 +53,6 @@ def terminal_cost_approx(x, goal):
     qf = 2 * Qf @ (x - np.hstack([goal, [0, 0]]))
     lf = (x[:2] - goal)**2 @ np.ones(2)
     return Qf, qf, lf
-
-# Build local costmap from trajectory
-def build_local_costmap_from_trajectory(x_seq, density_map, grid_x, grid_y):
-    # Clip density for safety
-    return density_map
 
 # IPDDP core step
 def ipddp_step(x0, x_ref, u_seq, goal, gs_map, T, dt, alpha=0.5):
@@ -95,7 +70,7 @@ def ipddp_step(x0, x_ref, u_seq, goal, gs_map, T, dt, alpha=0.5):
 
     for t in range(T):
         fx, fu = finite_difference_jacobian(dynamics, x_seq[t], u_seq[t], dt)
-        Q, R, q, r, l = cost_quadratic_approx(x_seq[t], u_seq[t], goal, gs_map, w_obs=50.0)
+        Q, R, q, r, l = cost_quadratic_approx(x_seq[t], u_seq[t], goal, gs_map, w_logbar=0.01)
         fx_seq.append(fx)
         fu_seq.append(fu)
         Q_seq.append(Q)
@@ -149,8 +124,8 @@ def ipddp_step(x0, x_ref, u_seq, goal, gs_map, T, dt, alpha=0.5):
 # -------------------------
 # Main Execution
 # -------------------------
-T = 50
-dt = 0.2
+T = 100
+dt = 0.1
 x0 = np.array([0.0, 0.0, 0.0, 0.0])
 goal = np.array([8.0, 8.0])
 
@@ -162,42 +137,69 @@ u_seq = np.zeros((T, 2))
 
 # Gaussian map
 mus = np.array([
-    [2.0, 3.0],
-    [5.0, 5.0],
-    [7.0, 2.0],
-    [7.5, 7.5]
+    [4.0, 4.0],   # 중앙의 큰 장애물
+    [2.0, 6.0],   # 왼쪽 위 방해 장애물
+    [6.0, 2.0],   # 오른쪽 아래 방해 장애물
+    [5.0, 8.0],   # 목표 근처에 얇은 벽 형태
+    [3.0, 3.0],   # 경로 중간에 있는 회피 유도 장애물
+    [4.0, 6.0],   # 중앙 세로 벽
 ])
 
 covs = np.array([
-    [[0.5, 0.2],
-     [0.2, 0.3]],
-    [[0.3, 0.0],
+    [[1.0, 0.0],     # 중앙 큰 장애물 (둥근)
+     [0.0, 1.0]],
+    
+    [[0.3, 0.0],     # 좁은 타원형 장애물 (수직 장벽)
+     [0.0, 1.0]],
+    
+    [[1.0, 0.0],     # 가로 긴 장애물
      [0.0, 0.3]],
-    [[0.7, -0.1],
-     [-0.1, 0.4]],
-    [[0.7, -0.5],
-     [-0.5, 0.7]],
+    
+    [[0.2, 0.0],     # 수직 얇은 벽
+     [0.0, 1.2]],
+    
+    [[0.6, 0.2],     # 타원형으로 기울어진 장애물
+     [0.2, 0.5]],
+    
+    [[0.2, 0.0],     # 좁은 수직 장벽
+     [0.0, 2.0]],
 ])
 
-alphas = np.array([1.0, 0.8, 0.6, 0.9])
-
+alphas = np.array([
+    1.0,  # 중앙
+    0.8,  # 왼쪽 위
+    0.7,  # 오른쪽 아래
+    0.9,  # 목표 근처
+    0.6,  # 회피 유도
+    0.7,  # 수직 장벽
+])
 # Gaussian map 생성
 gs_map = Gaussian2DMap(mus, covs, alphas)
 
 # Iterative optimization
 x_seq = x_seq.copy()  # 초기 trajectory (reference)
 cost_prev = 1e10
+best_cost = 1e10
+best_x_seq = None
+best_u_seq = None
+
 for i in range(1000):
     x_seq, u_seq = ipddp_step(x0, x_seq, u_seq, goal, gs_map, T, dt, alpha=0.5)
     
     cost_now = np.sum([np.linalg.norm(u)**2 for u in u_seq]) + np.linalg.norm(x_seq[-1][:2] - goal)**2
     print(f"[Iter {i}] Cost: {cost_now:.4f}")
     
+    if cost_now < best_cost:
+        best_cost = cost_now
+        best_x_seq = x_seq.copy()
+        best_u_seq = u_seq.copy()
+
     if abs(cost_now - cost_prev) < 1e-3 and np.linalg.norm(u_seq - u_seq_prev) < 1e-3:
         print("Converged.")
         break
     cost_prev = cost_now
     u_seq_prev = u_seq
+
 
 x = np.linspace(0, 10, 200)
 y = np.linspace(0, 10, 200)
@@ -212,6 +214,10 @@ plt.contourf(xx, yy, density_map, levels=50, cmap='inferno')  # 배경 density
 # Trajectory
 plt.plot(x_seq[:, 0], x_seq[:, 1], c='cyan', lw=3, label='Optimized Path')
 plt.scatter(x_seq[:, 0], x_seq[:, 1], c='white', s=15, label='Trajectory Points', zorder=5)
+
+if best_x_seq is not None:
+    plt.plot(best_x_seq[:, 0], best_x_seq[:, 1], c='magenta', lw=2, linestyle='--', label='Best Path')
+    plt.scatter(best_x_seq[:, 0], best_x_seq[:, 1], c='magenta', s=10, alpha=0.5, label='Best Points', zorder=4)
 
 # Start and goal
 plt.scatter(x0[0], x0[1], c='blue', label='Start', s=50, edgecolors='k')

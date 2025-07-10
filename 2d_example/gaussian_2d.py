@@ -62,47 +62,91 @@ class Gaussian2DMap:
 
         return total_density, grad, weighted_risk
     
-# 예시 Gaussian 데이터 (3개)
-mus = np.array([
-    [2.0, 3.0],
-    [5.0, 5.0],
-    [7.0, 2.0],
-    [7.5, 7.5]
-])
+    def mahalanobis_logbarrier(self, x, delta=1.0, max_grad=10.0):
+        N = x.shape[0]
+        cost = np.zeros(N)
+        grad = np.zeros((N, 2))
 
-covs = np.array([
-    [[0.5, 0.2],
-     [0.2, 0.3]],
-    [[0.3, 0.0],
-     [0.0, 0.3]],
-    [[0.7, -0.1],
-     [-0.1, 0.4]],
-    [[0.7, -0.5],
-     [-0.5, 0.7]],
-])
+        for i in range(len(self.mus)):
+            mu = self.mus[i]
+            cov = self.covs[i]
+            alpha = self.alphas[i]
 
-alphas = np.array([1.0, 0.8, 0.6, 0.9])
+            cov_inv = np.linalg.inv(cov)
+            diff = x - mu
+            D = np.einsum('ni,ij,nj->n', diff, cov_inv, diff)
+            eps = 1e-5
+            d_safe = np.maximum(D - delta, eps)
 
-# Gaussian map 생성
-gs_map = Gaussian2DMap(mus, covs, alphas)
+            # Clipped gradient
+            g = 1.0 / d_safe
+            g = np.minimum(g, max_grad)
 
-# 좌표 그리드 생성
-x = np.linspace(0, 10, 100)
-y = np.linspace(0, 10, 100)
-xx, yy = np.meshgrid(x, y)
-points = np.stack([xx.ravel(), yy.ravel()], axis=1)
+            cost += -alpha * np.log(d_safe)
+            grad += -alpha * (2 * (cov_inv @ diff.T).T) * g[:, None]
 
-# 밀도 계산
-densities = gs_map.density(points)
-density_map = densities.reshape(xx.shape)
+        return cost, grad
 
-# 결과 시각화
-plt.figure(figsize=(6,6))
-plt.contourf(xx, yy, density_map, levels=50, cmap='viridis')
-plt.colorbar(label='Density')
-plt.scatter(mus[:,0], mus[:,1], c='red', marker='x', label='Gaussian Centers')
-plt.title('2D Gaussian Splatting Map Density')
-plt.xlabel('X')
-plt.ylabel('Y')
-plt.legend()
-plt.show()
+
+if __name__ == "__main__":
+    # 예시 Gaussian 데이터 (3개)
+    mus = np.array([
+        [2.0, 2.5],   # 장애물 cluster 1
+        [2.5, 3.0],
+        [3.0, 3.5],
+        [4.0, 5.0],   # 장애물 cluster 2
+        [5.0, 5.0],
+        [6.0, 5.0],
+        [5.0, 2.5],   # 장벽 형태
+        [5.0, 3.0],
+        [5.0, 3.5],
+        [7.5, 6.0],   # 끝단 장애물
+        [8.0, 6.5]
+    ])
+
+    # 방향성과 모양을 더 복잡하게 만든 공분산 행렬들
+    covs = np.array([
+        [[0.4, 0.2], [0.2, 0.3]],
+        [[0.3, 0.1], [0.1, 0.2]],
+        [[0.5, -0.1], [-0.1, 0.4]],
+        [[0.2, 0.1], [0.1, 0.5]],
+        [[0.6, -0.3], [-0.3, 0.6]],
+        [[0.3, 0.0], [0.0, 0.3]],
+        [[1.0, 0.0], [0.0, 0.1]],  # 긴 장벽
+        [[1.0, 0.0], [0.0, 0.1]],
+        [[1.0, 0.0], [0.0, 0.1]],
+        [[0.3, 0.2], [0.2, 0.3]],
+        [[0.4, -0.2], [-0.2, 0.4]]
+    ])
+
+    # 각각에 대한 중요도 (높은 값은 더 강한 장애물)
+    alphas = np.array([
+        0.8, 0.6, 0.7,
+        0.9, 1.2, 0.9,
+        1.0, 1.0, 1.0,
+        0.7, 0.7
+    ])
+
+    # Gaussian map 생성
+    gs_map = Gaussian2DMap(mus, covs, alphas)
+
+    # 좌표 그리드 생성
+    x = np.linspace(0, 10, 100)
+    y = np.linspace(0, 10, 100)
+    xx, yy = np.meshgrid(x, y)
+    points = np.stack([xx.ravel(), yy.ravel()], axis=1)
+
+    # 밀도 계산
+    densities = gs_map.density(points)
+    density_map = densities.reshape(xx.shape)
+
+    # 결과 시각화
+    plt.figure(figsize=(6,6))
+    plt.contourf(xx, yy, density_map, levels=50, cmap='viridis')
+    plt.colorbar(label='Density')
+    plt.scatter(mus[:,0], mus[:,1], c='red', marker='x', label='Gaussian Centers')
+    plt.title('2D Gaussian Splatting Map Density')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.legend()
+    plt.show()
